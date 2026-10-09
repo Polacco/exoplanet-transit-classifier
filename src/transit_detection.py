@@ -119,4 +119,6 @@ def find_transits(
         "t0": float(best_t0.value),
         "snr": float(snr),
         "power": float(results.power[best_idx]),
+        "periods": np.asarray(results.period),
+        "powers": np.asarray(results.power),
     }
