@@ -51,3 +51,14 @@ def test_pipeline_detects_kepler10b_period(kepler10_lc):
     assert abs(detected_period - published_period) / published_period < 0.05
     assert result["snr"] > 5
     assert output.exists()
+
+
+def test_max_duration_must_be_smaller_than_min_period():
+    """astropy exige duraciones < período mínimo; lo validamos con un error claro."""
+    import numpy as np
+    import pandas as pd
+
+    t = np.linspace(0, 10, 500)
+    lc = pd.DataFrame({"time": t, "flux": np.ones_like(t), "flux_err": np.full_like(t, 1e-4)})
+    with pytest.raises(ValueError, match="max_duration"):
+        find_transits(lc, period_range=(0.2, 1.0), max_duration=0.3)
