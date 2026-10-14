@@ -1,29 +1,32 @@
-"""Entrenamiento y evaluación del clasificador CONFIRMED vs FALSE POSITIVE.
+"""Entrenamiento y evaluación del clasificador CONFIRMED vs FALSE POSITIVE (v3).
 
-Pasos:
+Unidad de análisis: un KOI por fila (``data/features_dataset_v3.csv``), con las 9
+features de ``koi_features.FEATURE_COLUMNS_V3``. Ninguna columna ``koi_*`` del
+catálogo entra como feature (data leakage).
 
-1. Carga ``data/features_dataset_v2.csv`` por defecto (una fila por estrella);
-   ``--dataset`` permite elegir otro CSV (p. ej. ``data/features_dataset_v1.csv``).
-2. Usa SOLO las features calculadas desde la curva de luz. ``kepid`` no es
-   feature (es un identificador) y las columnas ``koi_*`` del catálogo NASA
-   tampoco (data leakage: son el resultado del pipeline que generó la etiqueta).
-3. Compara Random Forest contra dos baselines (regresión logística y un
-   clasificador "tonto") con validación cruzada estratificada de 5 folds.
-4. Evalúa el Random Forest en un split estratificado 80/20 y guarda figuras en
-   ``docs/``, las estrellas mal clasificadas en ``data/misclassified.csv`` y el
-   pipeline completo en ``data/model.pkl``.
+Pasos de ``main()``:
+
+1. Resultado principal: Random Forest (imputer dentro del Pipeline) con
+   ``StratifiedGroupKFold`` por ``kepid``, 5 folds x 5 repeticiones (los mismos
+   25 folds de ``compare_v2_v3.py``). Se reporta media y desvío de 5 métricas.
+2. Split held-out agrupado por ``kepid`` (~80/20, semilla fija): ninguna
+   estrella aparece en train y test. Con ese test se calculan las métricas, las
+   figuras de ``docs/`` (matriz de confusión, ROC, importancia por permutación)
+   y ``data/misclassified.csv``.
+3. Se guarda el Pipeline entrenado con el 80% en ``data/model.pkl`` y la lista
+   de features en ``data/model_features.json``.
 
 Uso:
     source venv/bin/activate.fish
     python src/train_model.py
-    python src/train_model.py --dataset data/features_dataset_v1.csv
 
-Para comparar v1 vs v2 con CV repetida y folds pareados, ver ``compare_versions.py``.
+``build_models``, ``load_dataset`` y las constantes v1/v2 se conservan porque las
+usan ``compare_versions.py`` y ``compare_v2_v3.py``.
 """
 
 from __future__ import annotations
 
-import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -46,16 +49,23 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
+from sklearn.model_selection import (
+    StratifiedGroupKFold,
+    StratifiedKFold,
+    cross_validate,
+    train_test_split,
+)
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 DOCS_DIR = PROJECT_ROOT / "docs"
-DATASET_PATH = DATA_DIR / "features_dataset_v2.csv"
+DATASET_PATH = DATA_DIR / "features_dataset_v2.csv"  # usado por compare_versions.py
+DATASET_V3_PATH = DATA_DIR / "features_dataset_v3.csv"
 MODEL_PATH = DATA_DIR / "model.pkl"
 MISCLASSIFIED_PATH = DATA_DIR / "misclassified.csv"
+FEATURES_PATH = DATA_DIR / "model_features.json"
 
 # v1: snr/power crudos, 11 features.
 FEATURE_COLUMNS_V1 = [
@@ -111,6 +121,24 @@ def load_dataset(path: Path = DATASET_PATH) -> tuple[pd.DataFrame, pd.Series, pd
     X = df[FEATURE_COLUMNS if "log_snr" in df.columns else FEATURE_COLUMNS_V1]
     y = df["label"].map(LABEL_MAP).astype(int)
     return X, y, df["kepid"]
+
+
+def load_dataset_v3(path: Path = DATASET_V3_PATH) -> pd.DataFrame:
+    """Tabla v3 (una fila por KOI) con ``y`` (0/1) agregada; sin KOIs CANDIDATE."""
+    df = pd.read_csv(path)
+    df = df[df["label"].isin(LABEL_MAP)].reset_index(drop=True)
+    df["y"] = df["label"].map(LABEL_MAP).astype(int)
+    return df
+
+
+def heldout_split(df: pd.DataFrame, seed: int = SEED) -> tuple[np.ndarray, np.ndarray]:
+    """Índices (train, test) ~80/20, estratificado y agrupado por ``kepid``.
+
+    Es el primer fold de un ``StratifiedGroupKFold(5)``: ninguna estrella tiene
+    KOIs en train y test a la vez. Lo usan el entrenamiento y el notebook.
+    """
+    cv = StratifiedGroupKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
+    return next(cv.split(np.zeros(len(df)), df["y"], df["kepid"]))
 
 
 # --------------------------------------------------------------------------- #
@@ -213,11 +241,12 @@ def plot_roc_curve(model, X_test, y_test, path: Path) -> float:
     return auc
 
 
-def plot_feature_importance(importances: pd.Series, path: Path) -> None:
+def plot_feature_importance(importances: pd.Series, path: Path,
+                            xlabel: str = "Importancia (reducción media de impureza de Gini)") -> None:
     ordered = importances.sort_values()
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.barh(ordered.index, ordered.values, color="steelblue")
-    ax.set_xlabel("Importancia (reducción media de impureza de Gini)")
+    ax.set_xlabel(xlabel)
     ax.set_title("Random Forest: importancia de features")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -226,83 +255,75 @@ def plot_feature_importance(importances: pd.Series, path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
-def main(dataset_path: Path = DATASET_PATH) -> None:
+def grouped_cv_table(model: Pipeline, X, y, groups) -> pd.DataFrame:
+    """CV 5x5 agrupada por kepid; devuelve media y desvío de cada métrica."""
+    from compare_v2_v3 import grouped_splits  # import tardío: ese módulo importa este
+
+    scoring = {
+        "accuracy": "accuracy",
+        "precision": make_scorer(precision_score, zero_division=0),
+        "recall": make_scorer(recall_score, zero_division=0),
+        "f1": make_scorer(f1_score, zero_division=0),
+        "roc_auc": "roc_auc",
+    }
+    res = cross_validate(model, X, y, cv=grouped_splits(y, groups), scoring=scoring, n_jobs=-1)
+    return pd.DataFrame({m: {"mean": res[f"test_{m}"].mean(), "std": res[f"test_{m}"].std()}
+                         for m in METRICS}).T
+
+
+def main() -> None:
+    from compare_v2_v3 import build_models as build_v3_models  # mismo RF que la comparación
+    from koi_features import FEATURE_COLUMNS_V3, _assert_no_leakage
+
     plt.switch_backend("Agg")  # solo se guardan figuras, no se muestran
-    X, y, kepid = load_dataset(dataset_path)
-    columns = list(X.columns)
-    print(f"Dataset: {len(X)} estrellas, {y.sum()} CONFIRMED / {(1 - y).sum()} FALSE POSITIVE")
-    if len(X) < MIN_ROWS_RECOMMENDED:
-        print(f"AVISO: el dataset tiene menos de {MIN_ROWS_RECOMMENDED} filas; "
-              "los resultados tendrán bastante varianza.")
-    print(f"NaN por feature (los imputa la mediana del train):\n{X.isna().sum()[X.isna().any()]}\n")
+    _assert_no_leakage(FEATURE_COLUMNS_V3)
+    df = load_dataset_v3()
+    X, y, groups = df[FEATURE_COLUMNS_V3], df["y"], df["kepid"]
+    print(f"Dataset v3: {len(df)} KOIs en {groups.nunique()} estrellas, "
+          f"{y.sum()} CONFIRMED / {(1 - y).sum()} FALSE POSITIVE")
+    rf = build_v3_models()["Random Forest"]
 
-    models = build_models()
+    # --- Resultado principal: CV agrupada por estrella, 5x5 ---
+    cv = grouped_cv_table(rf, X, y, groups)
+    print("\nCV agrupada por kepid, 5 folds x 5 repeticiones (media ± std):")
+    print(cv.apply(lambda r: f"{r['mean']:.3f} ± {r['std']:.3f}", axis=1).to_string())
 
-    # --- Validación cruzada sobre todo el dataset ---
-    cv_table = cross_validate_models(models, X, y)
+    # --- Split held-out agrupado: figuras, errores y modelo guardado ---
+    tr, te = heldout_split(df)
+    assert not set(groups.iloc[tr]) & set(groups.iloc[te])
+    rf.fit(X.iloc[tr], y.iloc[tr])
+    X_test, y_test = X.iloc[te], y.iloc[te]
+    test = test_metrics(rf, X_test, y_test)
+    print(f"\nTest held-out ({len(te)} KOIs, {groups.iloc[te].nunique()} estrellas):")
+    print(pd.Series(test).round(3).to_string())
 
-    # --- Split estratificado 80/20 ---
-    X_train, X_test, y_train, y_test, _, id_test = train_test_split(
-        X, y, kepid, test_size=TEST_SIZE, stratify=y, random_state=SEED)
-    test_rows = {}
-    for name, model in models.items():
-        model.fit(X_train, y_train)
-        test_rows[name] = test_metrics(model, X_test, y_test)
-    test_table = pd.DataFrame(test_rows).T
-
-    print(format_cv_table(cv_table, test_table))
-
-    rf = models["Random Forest"]
-    lr_auc = cv_table.loc["Regresión logística", "roc_auc"][0]
-    rf_auc = cv_table.loc["Random Forest", "roc_auc"][0]
-    lr_std = cv_table.loc["Regresión logística", "roc_auc"][1]
-    rf_std = cv_table.loc["Random Forest", "roc_auc"][1]
-    gap = rf_auc - lr_auc
-    if gap > max(rf_std, lr_std) * 2 and gap > 0.02:
-        print(f"\nEl Random Forest le gana a la regresión logística (ΔAUC CV = {gap:+.3f}).")
-    else:
-        print(f"\nEl Random Forest NO le gana claramente a la regresión logística "
-              f"(ΔAUC CV = {gap:+.3f}, std RF {rf_std:.3f} / LR {lr_std:.3f}).")
-
-    # --- Resultados del RF en test ---
     DOCS_DIR.mkdir(exist_ok=True)
     plot_confusion_matrix(rf, X_test, y_test, DOCS_DIR / "confusion_matrix.png")
-    auc = plot_roc_curve(rf, X_test, y_test, DOCS_DIR / "roc_curve.png")
-
-    importances = pd.Series(rf.named_steps["clf"].feature_importances_, index=columns)
-    plot_feature_importance(importances, DOCS_DIR / "feature_importance.png")
-    print("\nImportancia de features (Gini, RF entrenado con el 80%):")
-    print(importances.sort_values(ascending=False).round(3).to_string())
-
-    # La importancia de Gini favorece features continuas/de alta cardinalidad;
-    # la de permutación (sobre test) es un contraste más honesto.
+    plot_roc_curve(rf, X_test, y_test, DOCS_DIR / "roc_curve.png")
     perm = permutation_importance(
         rf, X_test, y_test, scoring="roc_auc", n_repeats=20, random_state=SEED)
-    perm_s = pd.Series(perm.importances_mean, index=columns).sort_values(ascending=False)
+    perm_s = pd.Series(perm.importances_mean, index=FEATURE_COLUMNS_V3)
+    plot_feature_importance(perm_s, DOCS_DIR / "feature_importance.png",
+                            xlabel="Importancia por permutación (caída de AUC en test)")
     print("\nImportancia por permutación (caída de AUC en test):")
-    print(perm_s.round(3).to_string())
+    print(perm_s.sort_values(ascending=False).round(3).to_string())
 
     proba = rf.predict_proba(X_test)[:, 1]
-    pred = (proba >= 0.5).astype(int)
-    wrong = pred != y_test.values
+    wrong = (proba >= 0.5).astype(int) != y_test.values
     mis = pd.DataFrame({
-        "kepid": id_test.values[wrong],
+        "kepoi_name": df["kepoi_name"].iloc[te].values[wrong],
+        "kepid": groups.iloc[te].values[wrong],
         "true_label": [CLASS_NAMES[v] for v in y_test.values[wrong]],
         "predicted_proba_confirmed": proba[wrong].round(4),
     }).sort_values("predicted_proba_confirmed", ascending=False)
     mis.to_csv(MISCLASSIFIED_PATH, index=False)
-    print(f"\nMal clasificadas en test: {wrong.sum()} de {len(y_test)} (AUC test = {auc:.3f})")
-    print(mis.to_string(index=False))
+    print(f"\nMal clasificados en test: {wrong.sum()} de {len(te)}")
 
-    # --- Pipeline final guardado ---
-    # Se guarda el RF entrenado con el 80% de train, que es el que se evaluó:
-    # así las métricas, el CSV de errores y el notebook describen el mismo modelo.
+    # Se guarda el RF entrenado con el 80%: el que se evaluó y el que muestra el notebook.
     joblib.dump(rf, MODEL_PATH)
-    print(f"\nModelo guardado en {MODEL_PATH}")
+    FEATURES_PATH.write_text(json.dumps(FEATURE_COLUMNS_V3, indent=2))
+    print(f"Modelo: {MODEL_PATH}\nFeatures: {FEATURES_PATH}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Entrena y evalúa el clasificador.")
-    parser.add_argument("--dataset", type=Path, default=DATASET_PATH,
-                        help="CSV de features (v1 o v2).")
-    sys.exit(main(parser.parse_args().dataset))
+    main()
