@@ -1,0 +1,19 @@
+control,detail,seed,metric,value,std,n_folds
+referencia,v3 completo (9 features),,roc_auc,0.926,0.025,25
+etiquetas_mezcladas,"v3 completo, y permutada en train",0,roc_auc,0.493,0.078,25
+etiquetas_mezcladas,"v3 completo, y permutada en train",1,roc_auc,0.538,0.098,25
+etiquetas_mezcladas,"v3 completo, y permutada en train",2,roc_auc,0.479,0.071,25
+etiquetas_mezcladas,"v3 completo, y permutada en train",3,roc_auc,0.543,0.091,25
+etiquetas_mezcladas,"v3 completo, y permutada en train",4,roc_auc,0.462,0.087,25
+etiquetas_mezcladas,todas las semillas juntas,all,roc_auc,0.503,0.092,125
+efemeride_aleatoria,v3 recalculado con P y t0 falsos,0,roc_auc,0.637,0.047,25
+efemeride_aleatoria,  solo forma (5 features),0,roc_auc,0.568,0.055,25
+efemeride_aleatoria,v3 recalculado con P y t0 falsos,1,roc_auc,0.654,0.054,25
+efemeride_aleatoria,  solo forma (5 features),1,roc_auc,0.606,0.052,25
+efemeride_aleatoria,v3 recalculado con P y t0 falsos,2,roc_auc,0.663,0.042,25
+efemeride_aleatoria,  solo forma (5 features),2,roc_auc,0.625,0.035,25
+efemeride_aleatoria_importancia,log_depth_chi2,mean,perm_importance_auc_drop,0.0492,,25
+efemeride_aleatoria_importancia,log_depth_err_ppm,mean,perm_importance_auc_drop,0.0443,,25
+efemeride_aleatoria_importancia,log_secondary_snr,mean,perm_importance_auc_drop,0.0142,,25
+solo_forma,shape_uv_ratio+log_asymmetry_sigma+log_secondary_snr+log_odd_even_sigma+log_depth_chi2,,roc_auc,0.869,0.037,25
+solo_forma,  sin shape_uv_ratio,,roc_auc,0.758,0.045,25

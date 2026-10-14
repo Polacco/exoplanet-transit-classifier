@@ -42,7 +42,9 @@ def remove_outliers(lc: pd.DataFrame, sigma: float = 5) -> pd.DataFrame:
     return lc.loc[mask].reset_index(drop=True)
 
 
-def detrend(lc: pd.DataFrame, window_length: int) -> pd.DataFrame:
+def detrend(
+    lc: pd.DataFrame, window_length: int, mask: np.ndarray | None = None
+) -> pd.DataFrame:
     """Remueve la tendencia de largo plazo usando ``lightkurve.LightCurve.flatten``.
 
     ``flatten`` aplica internamente un filtro Savitzky-Golay para estimar
@@ -56,6 +58,10 @@ def detrend(lc: pd.DataFrame, window_length: int) -> pd.DataFrame:
         Longitud de la ventana del filtro Savitzky-Golay. Debe ser impar y
         menor que la cantidad de puntos; si no lo es, se ajusta
         automáticamente.
+    mask : np.ndarray | None, optional
+        Array booleano (mismo largo que ``lc``); los puntos en ``True`` (p. ej.
+        tránsitos conocidos) no se usan para estimar la tendencia, que se
+        interpola sobre ellos. Así el filtro no "come" la señal del tránsito.
 
     Returns
     -------
@@ -81,7 +87,11 @@ def detrend(lc: pd.DataFrame, window_length: int) -> pd.DataFrame:
         flux=lc["flux"].values,
         flux_err=lc["flux_err"].values,
     )
-    flat = lk_lc.flatten(window_length=window_length)
+    if mask is not None:
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape != (n,):
+            raise ValueError("mask debe tener el mismo largo que la curva de luz")
+    flat = lk_lc.flatten(window_length=window_length, mask=mask)
 
     return pd.DataFrame({
         "time": np.asarray(flat.time.value, dtype=float),

@@ -1,0 +1,10 @@
+model,features,n_features,roc_auc_mean,roc_auc_std,accuracy_mean,accuracy_std,f1_mean,f1_std
+LogReg (solo scaler),v2,12,0.669,0.05,0.699,0.051,0.757,0.049
+LogReg (solo scaler),v2+v3,21,0.868,0.045,0.779,0.05,0.813,0.044
+LogReg (solo scaler),v3,9,0.878,0.045,0.79,0.048,0.822,0.042
+LogReg + quantile,v2,12,0.691,0.052,0.637,0.048,0.685,0.045
+LogReg + quantile,v2+v3,21,0.851,0.039,0.768,0.038,0.792,0.035
+LogReg + quantile,v3,9,0.849,0.043,0.773,0.045,0.798,0.041
+Random Forest,v2,12,0.788,0.048,0.702,0.049,0.727,0.053
+Random Forest,v2+v3,21,0.931,0.025,0.843,0.038,0.863,0.036
+Random Forest,v3,9,0.926,0.025,0.856,0.032,0.876,0.028
